@@ -1,0 +1,24 @@
+name: publish to hashnode
+
+on:
+  push:
+    branches: [ main ]
+    paths: 
+      - "posts/**/*.md"
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+
+      - name: publish to hashnode
+        uses: actionsforge/actions-hashnode-publish@v1
+        with:
+          command: publish
+          token: ${{ secrets.HASHNODE_TOKEN }}
+          publication_id: ${{ secrets.HASHNODE_PUBLICATION_ID }}
+          file_path: posts/
+          is_draft: false
+          recursive: true
