@@ -1,12 +1,12 @@
 ---
-title: NET_BH
+articleId: 68b3f330846369b63325d0d9
 slug: NET_BH
 tags:
-    - linux network
-    - NAPI
-    - NET_BH
+- linux network
+- NAPI
+- NET_BH
+title: NET_BH
 ---
-
 > NET_BH는 1992년에 개발된 기술로, 개발 배경과 관련된 자료가 거의 남아 있지 않습니다. 따라서 아래 설명에는 이후 기술 흐름을 바탕으로 한 추론이 일부 포함되어 있습니다.
 
 # The first ethernet driver: *we*

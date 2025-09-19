@@ -1,12 +1,12 @@
 ---
-title: NET_RX_SOFTIRQ
+articleId: 68cdd73df5d6895a2a99150e
 slug: NET_RX_SOFTIRQ
 tags:
-    - linux network
-    - NAPI
-    - NET_RX_SOFTIRQ
+- linux network
+- NAPI
+- NET_RX_SOFTIRQ
+title: NET_RX_SOFTIRQ
 ---
-
 > 이 글에서는 NAPI(New API) 등장 이전의 NET_SOFTIRQ에 대해 다룹니다. NAPI 전후의 NET_RX_SOFTIRQ는 다소 차이가 있습니다.
 
 # SMP support in Linux
