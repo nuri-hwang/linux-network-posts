@@ -11,7 +11,7 @@ on:
       - 'posts/**/*.md'
 
 jobs:
-  sync-posts:
+  publish-to-hashnode:
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -57,3 +57,12 @@ jobs:
           
           echo "Updated posts:"
           echo "${{ steps.changed-files.outputs.modified_files }}"
+
+      - name: Publish to Hashnode
+        uses: kodelint/publish-to-hashnode@v1.0.1
+        with:
+          src: "./posts"
+          hashnode_pat: ${{ env.HASHNODE_TOKEN }}
+          publication_id: ${{ env.HASHNODE_PUBLICATION_ID }}
+          post_status: "public"
+          update_existing_posts: "true"

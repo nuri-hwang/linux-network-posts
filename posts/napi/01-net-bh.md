@@ -1,5 +1,4 @@
 ---
-articleId: 68b3f330846369b63325d0d9
 slug: NET_BH
 tags:
 - linux network
