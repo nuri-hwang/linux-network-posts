@@ -121,7 +121,9 @@ jobs:
                 continue
               fi
 
+              echo "python scripts/hashnode/get_normalized_slug.py \"$f\""
               SLUG="$(python scripts/hashnode/get_normalized_slug.py "$f")"
+              echo "python scripts/hashnode/get_article_id.py --host \"${HASHNODE_HOST}\" --slug \"${SLUG}\""
               ARTICLE_ID="$(python scripts/hashnode/get_article_id.py --host "${HASHNODE_HOST}" --slug "${SLUG}")"
 
               echo " file: $f"

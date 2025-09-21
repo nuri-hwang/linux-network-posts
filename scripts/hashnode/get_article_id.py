@@ -41,7 +41,10 @@ def get_hashnode_article_id():
         sys.exit(1)
 
     # Extract id
-    post_id = output.get("data", {}).get("publication", {}).get("post", {}).get("id")
+    post_id = ""
+    if output:
+        post_id = output.get("data", {}).get("publication", {}).get("post", {}).get("id")
+    
     if post_id:
         print(post_id)
     else:
