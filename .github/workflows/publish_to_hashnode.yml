@@ -1,24 +1,59 @@
-name: publish to hashnode
+name: Publish / Update Hashnode Posts
 
 on:
   push:
-    branches: [ main ]
-    paths: 
-      - "posts/**/*.md"
+    branches: ['**']
+    paths:
+      - 'posts/**/*.md'
+  pull_request:
+    branches: ['**']
+    paths:
+      - 'posts/**/*.md'
 
 jobs:
-  publish:
+  sync-posts:
     runs-on: ubuntu-latest
-    steps:
-      - name: checkout
-        uses: actions/checkout@v4
+    permissions:
+      contents: read
 
-      - name: publish to hashnode
-        uses: actionsforge/actions-hashnode-publish@v1
+    env:
+      HASHNODE_TOKEN: ${{ secrets.HASHNODE_TOKEN }}
+      HASHNODE_PUBLICATION_ID: ${{ secrets.HASHNODE_PUBLICATION_ID }}
+      HASHNODE_GQL_ENDPOINT: https://gql.hashnode.com
+      HASHNODE_HOST: linux-network.hashnode.dev
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
         with:
-          command: publish
-          token: ${{ secrets.HASHNODE_TOKEN }}
-          publication_id: ${{ secrets.HASHNODE_PUBLICATION_ID }}
-          file_path: posts/
-          is_draft: false
-          recursive: true
+          fetch-depth: 0  # full history to ensure git diff works
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f "scripts/requirement.pip" ]; then
+            echo "Found scripts/requirement.pip, installing packages from file..."
+            pip install -r scripts/requirement.pip
+          else
+            echo "No requirement file found, installing default packages..."
+            pip install pyyaml requests
+          fi
+
+      - name: Get changed files
+        id: changed-files
+        uses: tj-actions/changed-files@v34
+        with:
+          files: "posts/**/*.md"
+
+      - name: List new and updated posts
+        run: |
+          echo "New posts:"
+          echo "${{ steps.changed-files.outputs.added_files }}"
+          
+          echo "Updated posts:"
+          echo "${{ steps.changed-files.outputs.modified_files }}"
