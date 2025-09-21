@@ -1,24 +1,183 @@
-name: publish to hashnode
+name: Publish / Update Hashnode Posts
 
 on:
   push:
-    branches: [ main ]
-    paths: 
-      - "posts/**/*.md"
+    branches: ['**']
+    paths:
+      - 'posts/**/*.md'
+  pull_request:
+    branches: ['**']
+    paths:
+      - 'posts/**/*.md'
 
 jobs:
-  publish:
+  sync-posts:
     runs-on: ubuntu-latest
-    steps:
-      - name: checkout
-        uses: actions/checkout@v4
+    permissions:
+      contents: read
 
-      - name: publish to hashnode
-        uses: actionsforge/actions-hashnode-publish@v1
+    env:
+      HASHNODE_TOKEN: ${{ secrets.HASHNODE_TOKEN }}
+      HASHNODE_PUBLICATION_ID: ${{ secrets.HASHNODE_PUBLICATION_ID }}
+      HASHNODE_GQL_ENDPOINT: https://gql.hashnode.com
+      HASHNODE_HOST: linux-network.hashnode.dev
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
         with:
-          command: publish
-          token: ${{ secrets.HASHNODE_TOKEN }}
-          publication_id: ${{ secrets.HASHNODE_PUBLICATION_ID }}
-          file_path: posts/
-          is_draft: false
-          recursive: true
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyyaml requests
+
+      - name: Scan post diffs
+        id: diffs
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          EVENT_NAME="${{ github.event_name }}"
+          AFTER="${{ github.sha }}"
+          ADDED_JOINED=""
+          UPDATED_JOINED=""
+
+          is_post_md() { [[ "$1" =~ ^posts/.*\.md$ ]]; }
+
+          resolve_before_for_pr() {
+            local base_sha="${1}"
+            git fetch --no-tags --prune --depth=1 origin "${base_sha}" >/dev/null 2>&1 || true
+            echo "${base_sha}"
+          }
+
+          resolve_before_for_push() {
+            local before_in="${1}"
+            local after_sha="${2}"
+            if [[ -z "${before_in}" || "${before_in}" =~ ^0+$ ]] \
+               || ! git cat-file -e "${before_in}^{commit}" 2>/dev/null; then
+              if git rev-parse "${after_sha}^" >/dev/null 2>&1; then
+                git rev-parse "${after_sha}^"
+              else
+                git hash-object -t tree /dev/null
+              fi
+            else
+              echo "${before_in}"
+            fi
+          }
+
+          if [[ "${EVENT_NAME}" == "pull_request" ]]; then
+            BEFORE="$(resolve_before_for_pr "${{ github.event.pull_request.base.sha }}")"
+          else
+            BEFORE_IN="${{ github.event.before || '' }}"
+            BEFORE="$(resolve_before_for_push "${BEFORE_IN}" "${AFTER}")"
+          fi
+
+          CHANGED="$(git diff --name-status "${BEFORE}" "${AFTER}" || true)"
+
+          declare -a ADDED=()
+          declare -a UPDATED=()
+
+          while IFS=$'\t' read -r status p1 p2; do
+            case "$status" in
+              A) [[ -n "$p1" ]] && is_post_md "$p1" && ADDED+=("$p1") ;;
+              M) [[ -n "$p1" ]] && is_post_md "$p1" && UPDATED+=("$p1") ;;
+              R*) [[ -n "$p2" ]] && is_post_md "$p2" && UPDATED+=("$p2") ;;
+              *) : ;;
+            esac
+          done <<< "$CHANGED"
+
+          ADDED_JOINED="$(printf '%s,' "${ADDED[@]:-}" | sed 's/,$//')"
+          UPDATED_JOINED="$(printf '%s,' "${UPDATED[@]:-}" | sed 's/,$//')"
+
+          {
+            echo "added_posts=${ADDED_JOINED}"
+            echo "updated_posts=${UPDATED_JOINED}"
+          } >> "$GITHUB_OUTPUT"
+
+      # DRY-RUN on non-main: print articleIds only
+      - name: print articleIds (non-main)
+        if: ${{ !(github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "== DRY RUN =="
+          echo "added_posts : ${{ steps.diffs.outputs.added_posts }}"
+          echo "updated_posts : ${{ steps.diffs.outputs.updated_posts }}"
+          echo
+
+          if [[ -n "${{ steps.diffs.outputs.updated_posts }}" ]]; then
+            IFS=',' read -ra UFILES <<< "${{ steps.diffs.outputs.updated_posts }}"
+            echo "[updated posts]"
+            for f in "${UFILES[@]}"; do
+              if [ -z "$f" ]; then
+                continue
+              fi
+
+              SLUG="$(python scripts/hashnode/get_normalized_slug.py "$f")"
+              ARTICLE_ID="$(python scripts/hashnode/get_article_id.py --host "${HASHNODE_HOST}" --slug "${SLUG}")"
+
+              echo " file: $f"
+              echo " slug : ${SLUG}"
+              echo " articleId : ${ARTICLE_ID:-"(none)"}"
+            done
+            echo
+          fi
+
+          if [[ -n "${{ steps.diffs.outputs.added_posts }}" ]]; then
+            IFS=',' read -ra AFILES <<< "${{ steps.diffs.outputs.added_posts }}"
+            echo "[added posts]"
+            for f in "${AFILES[@]}"; do
+              if [ -z "$f" ]; then
+                continue
+              fi
+
+              SLUG="$(python scripts/hashnode/get_normalized_slug.py "$f")"
+
+              echo " file: $f"
+              echo " slug : ${SLUG}"
+            done
+          fi
+
+      # Publish on main only
+      - name: Create posts (main only)
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.diffs.outputs.added_posts != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          IFS=',' read -ra FILES <<< "${{ steps.diffs.outputs.added_posts }}"
+          echo "[publish] create posts:"
+          for f in "${FILES[@]}"; do
+            [ -z "$f" ] && continue
+            python scripts/parse_frontmatter.py "$f" \
+              | python scripts/normalize_slug.py \
+              | python scripts/hashnode_create_post.py "${HASHNODE_TOKEN}" "${HASHNODE_PUBLICATION_ID}" "${HASHNODE_GQL_ENDPOINT}" > resp.json
+            AID="$(cat resp.json | python scripts/print_article_id.py)"
+            echo " created: $f -> articleId=${AID}"
+          done
+
+      - name: Update posts (main only)
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.diffs.outputs.updated_posts != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          IFS=',' read -ra FILES <<< "${{ steps.diffs.outputs.updated_posts }}"
+          echo "[publish] update posts:"
+          for f in "${FILES[@]}"; do
+            [ -z "$f" ] && continue
+            python scripts/parse_frontmatter.py "$f" \
+              | python scripts/normalize_slug.py > payload.json
+            cat payload.json \
+              | python scripts/hashnode_resolve_article_id.py "${HASHNODE_TOKEN}" "${HASHNODE_PUBLICATION_ID}" "${HASHNODE_GQL_ENDPOINT}" > resolve.json
+            cat payload.json resolve.json \
+              | python scripts/hashnode_upsert_post.py "${HASHNODE_TOKEN}" "${HASHNODE_PUBLICATION_ID}" "${HASHNODE_GQL_ENDPOINT}" > resp.json
+            AID="$(cat resp.json | python scripts/print_article_id.py)"
+            echo " updated: $f -> articleId=${AID}"
+          done
