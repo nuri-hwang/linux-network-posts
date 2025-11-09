@@ -1,8 +1,8 @@
 ---
-title: "NET_RX_SOFTIRQ2"
+title: "NET_RX_SOFTIRQ"
 datePublished: Fri Sep 19 2025 22:20:45 GMT+0000 (Coordinated Universal Time)
 cuid: cmfreleor000502jo2ugq9yx6
-slug: netrxsoftirq2
+slug: netrxsoftirq
 
 ---
 
