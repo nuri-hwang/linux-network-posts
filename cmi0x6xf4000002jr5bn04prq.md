@@ -2,7 +2,7 @@
 title: "NET_RX_SOFTIRQ"
 datePublished: Sat Nov 15 2025 23:30:42 GMT+0000 (Coordinated Universal Time)
 cuid: cmi0x6xf4000002jr5bn04prq
-slug: netrxsoftirq-1
+slug: netrxsoftirq-1--deleted
 tags: linux-network, napi, netrxsoftirq
 
 ---
