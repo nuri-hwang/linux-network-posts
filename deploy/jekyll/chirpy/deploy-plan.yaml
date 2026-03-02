@@ -1,0 +1,31 @@
+posts:
+  - post: posts/napi/01-net-bh.md
+    copyto: sites/jekyll/chirpy/_posts/2025-07-27-from-we-to-net_bh.md
+    frontmatter: |
+      ---
+      title: "From *we* to NET_BH: Ealry ethernet driver constraints and the move toward NET_BH"
+      date: 2025-07-27
+      categories: [napi]
+      tags: [napi, inet_bh, net_bh]
+      mermaid: true
+      ---
+  - post: posts/napi/02-net-rx-softirq.md
+    copyto: sites/jekyll/chirpy/_posts/2025-08-03-early-net_rx_softirq.md
+    frontmatter: |
+      ---
+      title: "Early NET_RX_SOFTIRQ: Overcoming NET_BH scalability limits as SMP support arrived"
+      date: 2025-08-03
+      categories: [napi]
+      tags: [napi, net_rx_softirq]
+      mermaid: true
+      ---
+  - post: posts/napi/03-beyond-softnet.md
+    copyto: sites/jekyll/chirpy/_posts/2026-01-04-napi-beyond-softnet.md
+    frontmatter: |
+      ---
+      title: "NAPI: Beyond Softnet"
+      date: 2026-01-04
+      categories: [napi]
+      tags: [napi, net_rx_softirq]
+      mermaid: true
+      ---
