@@ -1,0 +1,73 @@
+name: Build & Deploy (Chirpy)
+
+on:
+  push:
+    branches: ["deploy/chirpy-jekyll"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+    
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Setup Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.1"
+          bundler-cache: true
+          working-directory: sites/jekyll/chirpy
+
+      - name: Prepare content
+        run: |
+          pip install -r deploy/jekyll/chirpy/requirements.pip
+          python deploy/jekyll/chirpy/deploy.py
+
+      - name: Build Chirpy assets (npm)
+        working-directory: sites/jekyll/chirpy
+        run: |
+          npm install
+          npm run build
+
+      - name: Build site (Jekyll)
+        working-directory: sites/jekyll/chirpy
+        run: bundle exec jekyll build
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: sites/jekyll/chirpy/_site
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: build
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
