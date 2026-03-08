@@ -29,3 +29,23 @@ posts:
       tags: [napi, net_rx_softirq]
       mermaid: true
       ---
+  - post: posts/napi/04-busy-poll-01-baseline.md
+    copyto: sites/jekyll/chirpy/_posts/2026-03-08-napi-busy-poll-baseline.md
+    frontmatter: |
+      ---
+      title: "NAPI busy poll(1/3): Baseline"
+      date: 2026-03-08
+      categories: [napi]
+      tags: [napi, busy_poll]
+      mermaid: true
+      ---
+  - post: posts/napi/04-busy-poll-02-low-latency-socket.md
+    copyto: sites/jekyll/chirpy/_posts/2026-03-08-napi-busy-poll-low-latency-socket.md
+    frontmatter: |
+      ---
+      title: "NAPI busy poll(2/3): Low latency socket"
+      date: 2026-03-08
+      categories: [napi]
+      tags: [napi, busy_poll]
+      mermaid: true
+      ---
