@@ -1,11 +1,11 @@
 # softnet
 
-1996년, 리눅스는 멀티프로세서를 지원하기 위해 2.0에 SMP를 추가하였습니다. 이후 1999년, [Mindcraft](http://mindcraft.com/)는 NT와 리눅스를 비교한 [벤치마크](https://www.kegel.com/nt-linux-benchmarks.html)를 공개했습니다. 이 벤치마트를 통해 리눅스의 scalability에 문제가 있음이 확인되었습니다. 이를 개선하기 위해 개발자 버전인 2.3.43에 추가된 패치가 softnet입니다. (공식 버전 기준으로는 2.4버전부터 지원됩니다.) NET_RX_SOFTIRQ는 softnet 패치의 일부로 보입니다.
+1996년, 리눅스는 멀티프로세서를 지원하기 위해 2.0에 SMP를 추가하였습니다. 이후 1999년, [Mindcraft](http://mindcraft.com/)는 NT와 리눅스를 비교한 [벤치마크](https://www.kegel.com/nt-linux-benchmarks.html)를 공개했습니다. 이 벤치마크를 통해 리눅스의 scalability에 문제가 있음이 확인되었습니다. 이를 개선하기 위해 개발자 버전인 2.3.43에 추가된 패치가 softnet입니다. (공식 버전 기준으로는 2.4버전부터 지원됩니다.) NET_RX_SOFTIRQ는 softnet 패치의 일부로 보입니다.
 
 
 # *Beyond Softnet*
 
-softnet이 추가되었음에도 불구하고, 몇 가지 문제점이 남아 있었습니다. 이를 개선하기 위해 NAPI(New API) 메커니즘이 도입되었고, 이 메커니즘이 어떤 문제를 어떻게 해결했는지 설명한 논문이 *Beyond Softnet*입니다.
+softnet이 추가되었음에도 불구하고, 몇 가지 문제점이 남아 있었습니다. 이를 개선하기 위해 NAPI(New API) 메커니즘이 도입되었고, 이 메커니즘이 어떤 문제를 어떻게 해결했는지 설명한 논문이 *Beyond Softnet*입니다. 이 논문은 Jamal Hadi Salim, Robert Olsson, Alexey Kuznetsov가 작성하였고, Ottawa Linux Symposium 2005에서 발표되었습니다.
 
 
 # Problems
@@ -16,7 +16,7 @@ softnet이 패킷 수신 절차를 top-half와 bottom-half로 나누고, bottom-
 
 ## Limitation of mitigation solutions
 
-시스템이 네트워크 혼잡으로 인해 붕괴되는 것을 방지하기 위해, 몇 가지 하드웨어 기반 솔루션이 도입되었습니다.
+이 congestion collapse를 방지하기 위해, 몇 가지 하드웨어 기반 솔루션이 도입되었습니다.
 
 ### HFC(Hardware Flow Control)
 
@@ -42,12 +42,12 @@ FF는 이를 방지하기 위해 라우터 등에서 사용하는 RED(Random Ear
 
 NIC은 패킷을 CPU 메모리로 DMA한 후 인터럽트를 발생시킵니다. CPU는 인터럽트 핸들러를 실행하여 DMA된 패킷을 backlog queue에 넣습니다. 이때 *인터럽트 핸들러*가 실행하는 CPU 코어가 하나가 아니라면 어떤 일이 일어날까요?
 
-예를 들어, 패킷 A의 인터럽트 핸들러를 0번 코어가 실행하고, 직후에 수신된 패킷 B의 인터럽트 핸들러를 1번 코어가 실행한 경우를 생각해봅시다. 패킷 A는 0번 backlog queue에, 패킷 B는 1번 backlog queue에 각각 보관됩니다. 이후 각 코어의 NET_RX_SOFTIRQ가 실행 각 패킷을 처리하게 될겁니다. softirq는 *지연 실행* 될 수 있으므로 각 코어의 NET_RX_SOFTIRQ는 호출 순서에 맞춰 실행되지 않을 수 있습니다. 이 경우 패킷 순서 뒤바뀜이 발생하게 됩니다.
+예를 들어, 패킷 A의 인터럽트 핸들러를 0번 코어가 실행하고, 직후에 수신된 패킷 B의 인터럽트 핸들러를 1번 코어가 실행한 경우를 생각해봅시다. 패킷 A는 0번 backlog queue에, 패킷 B는 1번 backlog queue에 각각 보관됩니다. 이후 각 코어의 NET_RX_SOFTIRQ가 실행되어 각 패킷을 처리하게 될겁니다. softirq는 *지연 실행* 될 수 있으므로 각 코어의 NET_RX_SOFTIRQ는 호출 순서에 맞춰 실행되지 않을 수 있습니다. 이 경우 패킷 순서 뒤바뀜이 발생하게 됩니다.
 
 
 # NAPI(New API)
 
-softnet을 개선하는 과정에서 패킷 수신 매커니즘을 변경한 API가 개발되었습니다. 이 매커니즘을 NAPI라 부릅니다. NAPI는 2.4.7에서 처음 테스트되었고(이 논문 시점), 이후 개발자 버전인 2.5에서 계속 개발되다가 2.4.20으로 backport되었고, 이후 2.6부터 표준 패킷 수신 메커니즘으로 자리 잡게 됩니다.. ([ref](https://studylib.net/doc/7783820/a-map-of-the-networking-code-in-linux-kernel-2.4.20))
+softnet을 개선하는 과정에서 패킷 수신 매커니즘을 변경한 API가 개발되었습니다. 이 매커니즘을 NAPI라 부릅니다. NAPI는 2.4.7에서 처음 테스트되었고(이 논문 시점), 이후 개발자 버전인 2.5에서 계속 개발되다가 2.4.20으로 backport되었고, 이후 2.6부터 표준 패킷 수신 메커니즘으로 자리 잡게 됩니다. ([ref](https://studylib.net/doc/7783820/a-map-of-the-networking-code-in-linux-kernel-2.4.20))
 
 ## How NAPI works
 
@@ -95,7 +95,11 @@ sequenceDiagram
                 driver->>socket: netif_receive_skb()
             end
 
-            driver->>softirq: return budget
+            driver->>softirq: return work_done
+        end
+
+        alt poll complete (work_done < budget)
+            driver->>driver: napi_complete / re-enable irq
         end
 
         alt poll
@@ -106,7 +110,7 @@ sequenceDiagram
 
 ## Design goals
 
-NAPI 개발에는 7가지 다자인 목표가 있었습니다.
+NAPI 개발에는 7가지 디자인 목표가 있었습니다.
 
 1. Maintain the parallellization and scaling benefits of softnet
 2. Remove packet re−ordering in SMP.
@@ -143,17 +147,17 @@ NAPI에서는 드라이버의 poll 함수가 한 번에 커널로 전달할 수 
 
 NAPI가 리눅스에 병합된 이후, 2.6.24에서 한 차례 구조적인 개선 작업이 이루어집니다.
 
-## multiple NAPI instance
+## Multiple NAPI instances per device
 
 초기 NAPI에서는 NAPI 정보가 `net_device` 구조체에 포함되어 있었기 때문에, 하나의 네트워크 인터페이스는 하나의 NAPI instance만을 가질 수 있었습니다.
 
-NIC이 multi receive queue를 지원하게 되면서, 하나의 인터페이스가 여러 개의 NAPI instance를 가질 수 있도록 `napi_struct` 구조체가 `net_device`에서 분리되었습니
+NIC이 multi receive queue를 지원하게 되면서, 하나의 인터페이스가 여러 개의 NAPI instance를 가질 수 있도록 `napi_struct` 구조체가 `net_device`에서 분리되었습니다.
 
 ## Enhanced NAPI control
 
-초기 NAPI에서는 드라이버의 poll 콜백 함수가 패킷을 수신했음을 알리면, 커널은 반드시 한 번 더 폴링을 수행했습니다.
+초기 NAPI에서는 드라이버의 poll 콜백 함수가 `dev->quota`와 글로벌 `*budget`을 직접 조작해야 했고, poll의 반환값(0 또는 1)으로 폴링 완료 여부를 알렸습니다.
 
-불필요한 폴링을 제거하기 위해, 드라이버가 더 이상 수신할 패킷이 없음을 알릴 수 있는 API가 추가되었고, 커널이 드라이버의 수신량을 제어하는 데 사용되던 `quota` 변수는 제거되었습니다.
+2.6.24에서는 poll이 처리한 패킷 수(work_done)를 반환하도록 변경되었고, work_done < budget이면 폴링 완료로 판단하는 단순한 규약으로 전환되었습니다. 이 과정에서 `quota` 변수는 제거되었습니다.
 
 https://lwn.net/Articles/214457/
 https://lwn.net/Articles/244640/
