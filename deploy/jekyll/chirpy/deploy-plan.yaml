@@ -49,3 +49,13 @@ posts:
       tags: [napi, busy_poll]
       mermaid: true
       ---
+  - post: posts/napi/04-busy-poll-03-generic-device-polling.md
+    copyto: sites/jekyll/chirpy/_posts/2026-07-05-napi-busy-poll-generic-device-polling.md
+    frontmatter: |
+      ---
+      title: "NAPI busy poll(3/3): Generic device polling"
+      date: 2026-07-05
+      categories: [napi]
+      tags: [napi, busy_poll]
+      mermaid: true
+      ---
