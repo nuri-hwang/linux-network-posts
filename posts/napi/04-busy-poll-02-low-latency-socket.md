@@ -5,20 +5,20 @@
 
 2012년, Intel의 *Jesse Brandeburg*는 *Linux Plumbers*에서 네트워크 latency를 줄이기 위한 방법으로 [A way towards Lower Latency and Jitter](https://blog.linuxplumbersconf.org/2012/wp-content/uploads/2012/09/2012-lpc-Low-Latency-Sockets-slides-brandeburg.pdf)를 발표합니다. 내용을 간단하게만 살펴보겠습니다.
 
-유저 프로세스가 패킷이 도착하기 전에 `recv` 시스템콜을 호출했을 때를 시퀀스 다이어그램으로 표현하면 다음과 같습니다.
+유저 프로세스가 패킷이 도착하기 전에 `recv()` 시스템콜을 호출했을 때를 시퀀스 다이어그램으로 표현하면 다음과 같습니다.
 
 [관련 기사](https://lwn.net/Articles/551284/)
 
 ```mermaid
 sequenceDiagram
-	autonumber
+    autonumber
 
-    participant nic as NIC
-    participant mem as Memory
-    participant irq as IRQ handler
-    participant softirq as NAPI
-    participant sock as Socket
-    participant app as Application
+    participant nic as [NIC]
+    participant mem as [KERN] DMA Memory
+    participant irq as [DRV] irq_handler()
+    participant softirq as [KERN] net_rx_action()
+    participant sock as [KERN] Socket
+    participant app as [APP]
 
     app ->> sock: recv()
     alt no packet found
@@ -27,26 +27,22 @@ sequenceDiagram
 
     nic ->> mem: DMA packet
     nic ->> mem: Update descriptor
-    
-    rect rgb(230, 255, 235)
-        nic ->> irq: Hard IRQ
-        irq ->> softirq: Raise NET_RX_SOFTIRQ
-        softirq -->> softirq: (maybe delayed) net_rx_action()
-    end
+
+    nic ->> irq: Hard IRQ
+    irq ->> softirq: Raise NET_RX_SOFTIRQ
+    softirq -->> softirq: (maybe delayed) net_rx_action()
 
     softirq -->> softirq: Build skb
     softirq -->> sock: Enqueue skb
-    
-    rect rgb(230, 255, 235)
-        sock -->> sock: Signal / Wakeup
-        sock -->> app: Context Switch
-    end
+
+    sock -->> sock: Signal / Wakeup
+    sock -->> app: Context Switch
     sock ->> app: copy_to_user(skb)
 ```
 
 소켓에 `O_NONBLOCK` 플래그가 없다면, 패킷이 도착하거나 타임아웃이 발생할 때까지 유저 프로세스는 CPU를 내려놓고 대기(Sleep) 상태로 들어갑니다.
 
-이후 NIC이 패킷을 시스템 메모리로 전달(DMA)하고 인터럽트를 발생시키면, (5) hardirq 발생 (6)hardirq 핸들러 실행 (7) softirq(NAPI) 실행 (8) skb를 구성 (9) skb 큐잉 (10) 프로세스 wakeup 후에야 (12) 소켓으로부터 데이터를 읽어가게 됩니다. 만약 시스템콜에서 직접 NIC을 busy polling 할 수 있다면 (6), (7), (10) 단계를 생략할 수 있습니다.
+이후 NIC이 패킷을 시스템 메모리로 전달(DMA)하고 인터럽트를 발생시키면, (5) hardirq 발생 (6) hardirq 핸들러 실행 (7) softirq(NAPI) 실행 (8) skb를 구성 (9) skb 큐잉 (10) 프로세스 wakeup 후에야 (12) 소켓으로부터 데이터를 읽어가게 됩니다. 만약 시스템콜에서 직접 NIC을 busy polling 할 수 있다면 (6), (7), (10) 단계를 생략할 수 있습니다.
 
 이 기능은 리눅스 3.11에 머지되면서 공식 명칭이 `Busy Poll`로 변경되었습니다([mail](https://www.spinics.net/lists/kernel/msg1564214.html)). 현재 커널 코드 일부 변수명으로 ll(Low Latency)이라는 키워드가 남아 있는 이유가 바로 이 때문입니다.
 
@@ -58,7 +54,7 @@ sequenceDiagram
 Busy poll은 크게 두 가지로 나눌 수 있습니다.
 
 - `recv`-like syscalls: 소켓에서 데이터를 직접 읽을 때 수행하는 busy polling
-- `poll`-like syscalls: 여러 소켓의 이벤트를 대기(`poll`, `select`, `epoll`)할 때 수행하는 busy polling
+- `poll`-like syscalls: 여러 소켓의 이벤트를 대기(`poll()`, `select()`, `epoll()`)할 때 수행하는 busy polling
 
 
 ## `recv`-like syscalls
@@ -67,541 +63,152 @@ Busy poll은 크게 두 가지로 나눌 수 있습니다.
 
 Busy poll은 전역 설정 또는 소켓별 설정을 통해 활성화할 수 있습니다.
 
-- 전역 설정
-  - `/proc/sys/net/core/busy_read`: recv, recvmsg 등의 시스템콜에서 busy poll 할 시간(usec)
-    - 이 값은 전역변수 `sysctl_net_busy_read`에 저장됩니다.
-    - 이후 `struct sock` 초기화 시 이 값은 `sk_ll_usec` 멤버에 저장됩니다.
-```c
-	{
-		.procname	= "busy_read",
-		.data		= &sysctl_net_busy_read,
-		.maxlen		= sizeof(unsigned int),
-		.mode		= 0644,
-		.proc_handler	= proc_dointvec
-	},
-```
-```c
-void sock_init_data(struct socket *sock, struct sock *sk)
-    ...
-	sk->sk_ll_usec = sysctl_net_busy_read;
-```
-- 소켓별 설정
-  - `setsockopt`를 통해 `SO_BUSY_POLL` flag 설정
-    - 이 값은 `struct sock` 구조체의 `sk_ll_usec` 멤버에 저장됩니다.
-```c
-    unsigned int timeout_usec = 500;
-    setsockopt(sock, SOL_SOCKET, SO_BUSY_POLL, &timeout_usec, sizeof(timeout_usec));
-```
-```c
-int sock_setsockopt(struct socket *sock, int level, int optname,
-		    char __user *optval, unsigned int optlen)
-    ...
-	switch (optname) {
-    ...
-	case SO_BUSY_POLL:
-		/* allow unprivileged users to decrease the value */
-		if ((val > sk->sk_ll_usec) && !capable(CAP_NET_ADMIN))
-			ret = -EPERM;
-		else {
-			if (val < 0)
-				ret = -EINVAL;
-			else
-				sk->sk_ll_usec = val;
-		}
-		break;
+| 설정 방법 | 인터페이스 | 저장 위치 | 적용 범위 |
+|-----------|-----------|-----------|-----------|
+| 전역 | `/proc/sys/net/core/busy_read` | `sysctl_net_busy_read` → `sk->sk_ll_usec` | 모든 소켓 |
+| 소켓별 | `setsockopt(SO_BUSY_POLL)` | `sk->sk_ll_usec` | 해당 소켓 |
+
+### How busy poll runs
+
+패킷이 소켓에 도착할 때 커널은 해당 패킷이 어느 NAPI 인스턴스를 통해 들어왔는지 소켓에 기록합니다.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant gro as [KERN] napi_gro_receive()
+    participant l4 as [KERN] L4 rcv
+    participant rcvq as [KERN] sk_receive_queue@{ "type": "queue" }
+
+    gro ->> l4: tcp_v4_rcv() / __udp4_lib_rcv()
+    l4 ->> l4: sk_mark_napi_id(sk, skb)
+    l4 ->> rcvq: enqueue skb
 ```
 
-### How `busy poll` runs
+1. 드라이버의 `poll()` 콜백 함수가 `napi_gro_receive()`를 통해 skb를 네트워크 스택으로 전달. L4 핸들러(`tcp_v4_rcv()`, `__udp4_lib_rcv()`)가 호출됨.
+2. L4 핸들러가 `sk_mark_napi_id()`를 호출해 skb가 들어온 NAPI 인스턴스의 ID를 소켓(`sk->sk_napi_id`)에 기록.
+3. skb를 `sk->sk_receive_queue`에 적재.
 
-NIC은 보통 하나의 플로우(Flow)를 특정 수신 큐로 전달하며, 각 큐는 고유한 NAPI 인스턴스를 가집니다. 패킷이 도착하여 `sk_receive_queue`에 담길 때, 커널은 해당 패킷이 어떤 NAPI 인스턴스를 통해 들어왔는지 ID를 기록(`sk_mark_napi_id()`)합니다.
+이후 유저 프로세스가 `recv()`를 호출하면, 소켓에 기록된 NAPI ID를 이용해 `sk->sk_receive_queue`가 비어 있으면 해당 NAPI 인스턴스를 직접 폴링합니다.
 
-```c
-int tcp_v4_rcv(struct sk_buff *skb)
-{
-    ...
-+	sk_mark_napi_id(sk, skb);
+```mermaid
+sequenceDiagram
+    autonumber
+    participant app as [APP]
+    participant kern as [KERN] sk_busy_loop()
+    participant drv as [DRV] ndo_busy_poll()
+    participant rxq as [NIC] RXQ@{ "type": "queue" }
+    participant rcvq as [KERN] sk_receive_queue@{ "type": "queue" }
 
-	if (!sock_owned_by_user(sk)) {
-        if (!tcp_prequeue(sk, skb))
-            ret = tcp_v4_do_rcv(sk, skb);
-	} else if (unlikely(sk_add_backlog(sk, skb, sk->sk_rcvbuf + sk->sk_sndbuf))) {
-}
+    app ->> kern: recv() [sk_receive_queue empty]
+    kern ->> kern: napi_by_id(sk->sk_napi_id)
+    loop (3)~(6) retry ndo_busy_poll
+        kern ->> drv: ndo_busy_poll(napi)
+        drv ->> rxq: poll RX queue
+        drv ->> rcvq: enqueue skb (if found)
+        drv -->> kern: work
+    end
+    kern -->> app: return
 ```
 
-```c
-int __udp4_lib_rcv(struct sk_buff *skb, struct udp_table *udptable,
-		   int proto)
-{
-    ...
-	sk = __udp4_lib_lookup_skb(skb, uh->source, uh->dest, udptable);
+> **loop (3)~(6) retry ndo_busy_poll**: 다음 중 하나를 만족하면 종료
+> - `sk->sk_receive_queue`가 비어 있지 않음
+> - `need_resched()`
+> - 타임아웃(`sk->sk_ll_usec`) 도달
 
-	if (sk != NULL) {
-+		sk_mark_napi_id(sk, skb);
-		ret = udp_queue_rcv_skb(sk, skb);
-        ...
-}
-```
-
-이렇게 NAPI 인스턴스의 ID를 소켓에 기록하면, 이후 유저 프로세스가 `recv`를 호출할 때 어떤 NAPI 인스턴스를 대상으로 Busy Polling을 수행해야 하는지 알 수 있게 됩니다.
-
-이후 유저 프로세스가 `recv`를 호출하면, 커널은 `sk_can_busy_loop()`를 통해 busy poll 가능 여부를 확인합니다.
-
-```c
-static inline bool sk_can_busy_loop(struct sock *sk)
-{
-	return sk->sk_ll_usec && sk->sk_napi_id &&
-	       !need_resched() && !signal_pending(current);
-}
-```
-
-조건이 충족되면 `sk_busy_loop()` 내에서 드라이버의 `ndo_busy_poll()` 콜백을 반복 호출합니다.  `sk_busy_loop()`은 다음과 같이 동작합니다.
-
-```c
-bool sk_busy_loop(struct sock *sk, int nonblock)
-{
-	unsigned long end_time = !nonblock ? sk_busy_loop_end_time(sk) : 0;
-	const struct net_device_ops *ops;
-	struct napi_struct *napi;
-	int rc = false;
-    
-	napi = napi_by_id(sk->sk_napi_id);
-    
-	ops = napi->dev->netdev_ops;
-	if (!ops->ndo_busy_poll)
-		goto out;
-
-	do {
-		rc = ops->ndo_busy_poll(napi);
-        
-		cpu_relax();
-	} while (!nonblock && skb_queue_empty(&sk->sk_receive_queue) &&
-		 !need_resched() && !busy_loop_timeout(end_time));
-         
-	rc = !skb_queue_empty(&sk->sk_receive_queue);
-out:
-	return rc;
-}
-```
-
-나눠서 살펴보겠습니다.
-
-```c
-static inline unsigned long sk_busy_loop_end_time(struct sock *sk)
-{
-	return busy_loop_us_clock() + ACCESS_ONCE(sk->sk_ll_usec);
-}
-
-bool sk_busy_loop(struct sock *sk, int nonblock)
-{
-	unsigned long end_time = !nonblock ? sk_busy_loop_end_time(sk) : 0;
-```
-
-busy poll할 end_time을 계산합니다.
-
-```c
-	napi = napi_by_id(sk->sk_napi_id);
-```
-
-busy poll 할 NAPI 인스턴스를 가져옵니다.
-
-```c
-	ops = napi->dev->netdev_ops;
-	if (!ops->ndo_busy_poll)
-		goto out;
-```
-
-NAPI 인스턴스를 소유한 드라이버가 `ndo_busy_poll()` 콜백 함수를 가지고 있는지 확인합니다.
-
-```c
-	do {
-		rc = ops->ndo_busy_poll(napi);
-	} while (!nonblock && skb_queue_empty(&sk->sk_receive_queue) &&
-		 !need_resched() && !busy_loop_timeout(end_time));
-```
-
-다음의 조건 중 하나가 만족될때까지 루프를 돌며 드라이버의 `ndo_busy_poll()` 콜백 함수를 호출합니다.
-- `sk_receive_queue`가 비어 있지 않음
-- 스케쥴링이 필요함
-- 타임아웃에 도달함
-
-```c
-		cpu_relax();
-```
-
-하이퍼스레딩 환경에서 동일한 물리 코어를 공유하는 다른 논리 코어가 자원을 사용할 수 있게 합니다.[commit](https://github.com/torvalds/linux/commit/3046e2f5b79a86044ac0a29c69610d6ac6a4b882)
-
-
-드라이버의 `ndo_busy_poll` 콜백 함수는 다음과 같이 동작합니다.
-
-```c
-int nic_ndo_busy_poll(struct napi_struct *napi)
-{
-    struct nic_rxq *rxq = napi_to_rxq(napi);
-
-    spin_lock_bh(&rxq->lock);
-    done = __nic_napi_poll(rxq);
-    spin_unlock_bh(&rxq->lock);
-
-    return done;
-}
-```
-
-수신 큐 처리가 softirq와 동시에 수행되는 것을 방지하기 위해 락이 사용됩니다.
+1. 어플리케이션이 `recv()`를 호출. 커널은 `sk_can_busy_loop()`로 조건(`sk->sk_ll_usec && sk->sk_napi_id && !need_resched() && !signal_pending(current)`)을 확인.
+2. `sk->sk_napi_id`로 `napi_by_id()`를 통해 NAPI 인스턴스를 조회. 드라이버가 `ndo_busy_poll()` 콜백을 구현하지 않으면 종료.
+3. 드라이버의 `ndo_busy_poll(napi)`를 호출.
+4. NIC 수신 큐를 직접 폴링. 공통 코드(`sk_busy_loop()`)는 `rcu_read_lock_bh()`로 NAPI 조회~루프 구간을 보호하고, 드라이버(예: ixgbe)는 자체 상태 플래그로 NAPI softirq 폴링과의 동시 진입을 막는다.
+5. 패킷이 있으면 skb를 구성해 `sk->sk_receive_queue`에 적재. 루프 내 `cpu_relax()`로 하이퍼스레딩 환경에서 동일 물리 코어의 다른 논리 코어가 자원을 사용할 수 있게 함.
+6. 처리한 패킷 수(work)를 반환. 루프 조건에 따라 반복 또는 종료.
+7. 루프 종료 후 결과를 `recv()` 호출부로 반환. `sk->sk_receive_queue`에 데이터가 있으면 이어서 `copy_to_user()`로 복사된다.
 
 
 ## `poll`-like syscalls
 
 ### Busy poll setup
 
-`poll`이나 `select` 등의 시스템 콜에서도 busy poll을 수행하려면 다음의 설정이 추가되어야 합니다.
+`poll()`이나 `select()` 등의 시스템 콜에서도 busy poll을 수행하려면 다음의 설정이 추가되어야 합니다.
 
-- 전역 설정
-  - `/proc/sys/net/core/busy_poll`: poll, ppoll 등의 시스템콜에서 busy poll 할 시간(usec)
-    - 이 값은 전역변수 `sysctl_net_busy_poll`에 저장됩니다.
-```c
-	{
-		.procname	= "busy_poll",
-		.data		= &sysctl_net_busy_poll,
-		.maxlen		= sizeof(unsigned int),
-		.mode		= 0644,
-		.proc_handler	= proc_dointvec
-	},
-```
+| 설정 방법 | 인터페이스 | 저장 위치 |
+|-----------|-----------|-----------|
+| 전역 | `/proc/sys/net/core/busy_poll` | `sysctl_net_busy_poll` |
 
 ### `do_poll()` before `Busy Poll`
 
-`sysctl_net_busy_poll`는 `do_poll` 함수의 동작에 영향을 줍니다. 먼저 `do_poll`의 기본 동작을 살펴보겠습니다. 다음은 `Busy Poll`이 추가되기 전인 리눅스 3.10의 `do_poll`의 주석을 제거한 코드입니다.
-
-```c
-static int do_poll(unsigned int nfds,  struct poll_list *list,
-		   struct poll_wqueues *wait, struct timespec *end_time)
-{
-	poll_table* pt = &wait->pt;
-	ktime_t expire, *to = NULL;
-	int timed_out = 0, count = 0;
-	unsigned long slack = 0;
-
-	if (end_time && !end_time->tv_sec && !end_time->tv_nsec) {
-		pt->_qproc = NULL;
-		timed_out = 1;
-	}
-
-	if (end_time && !timed_out)
-		slack = select_estimate_accuracy(end_time);
-
-	for (;;) {
-		struct poll_list *walk;
-
-		for (walk = list; walk != NULL; walk = walk->next) {
-			struct pollfd * pfd, * pfd_end;
-
-			pfd = walk->entries;
-			pfd_end = pfd + walk->len;
-			for (; pfd != pfd_end; pfd++) {
-				if (do_pollfd(pfd, pt)) {
-					count++;
-					pt->_qproc = NULL;
-				}
-			}
-		}
-        
-		pt->_qproc = NULL;
-		if (!count) {
-			count = wait->error;
-			if (signal_pending(current))
-				count = -EINTR;
-		}
-		if (count || timed_out)
-			break;
-
-		if (end_time && !to) {
-			expire = timespec_to_ktime(*end_time);
-			to = &expire;
-		}
-
-		if (!poll_schedule_timeout(wait, TASK_INTERRUPTIBLE, to, slack))
-			timed_out = 1;
-	}
-	return count;
-}
-```
-
-중요 변수는 다음과 같습니다.
-- `timed_out` = 1: 더 이상 폴링하지 않고 루프를 마칩니다.
-- `count`: 이벤트가 발생한 fd의 개수
-- `expire`: 폴링을 마칠 시간
-
-코드를 나누어 보겠습니다.
-
-```c
-	if (end_time && !end_time->tv_sec && !end_time->tv_nsec) {
-		pt->_qproc = NULL;
-		timed_out = 1;
-	}
-
-	if (end_time && !timed_out)
-		slack = select_estimate_accuracy(end_time);
-```
-
-폴링을 마칠 시간을 계산합니다.
-
-```c
-	for (;;) {
-		for (walk = list; walk != NULL; walk = walk->next) {
-			for (; pfd != pfd_end; pfd++) {
-				if (do_pollfd(pfd, pt)) {
-					count++;
-				}
-			}
-		}
-```
-
-`do_pollfd()`을 통해 `poll_list`의 fd들에 이벤트가 발생했는지 확인하고, 이벤트가 발생한 fd의 개수를 `count`에 기록합니다.
-
-```c
-		if (!count) {
-			count = wait->error;
-			if (signal_pending(current))
-				count = -EINTR;
-		}
-		if (count || timed_out)
-			break;
-```
-
-이벤트가 발생했거나, 타임아웃에 도달했거나, 에러가 발생한 경우 루프를 종료하고
-
-```c
-	for (;;) {
-        ...
-
-		if (end_time && !to) {
-			expire = timespec_to_ktime(*end_time);
-			to = &expire;
-		}
-
-		if (!poll_schedule_timeout(wait, TASK_INTERRUPTIBLE, to, slack))
-			timed_out = 1;
-	}
-```
-
-아니면 타임아웃까지 스케쥴링을 요청합니다. (타임 아웃 전에 깨어난다면 루프가 2번을 초과해 돌 수 있습니다.)
-
-
-### `do_poll()` after `Busy Poll`
-
-```c
-static int do_poll(unsigned int nfds,  struct poll_list *list,
-		   struct poll_wqueues *wait, struct timespec *end_time)
-{
-	poll_table* pt = &wait->pt;
-	ktime_t expire, *to = NULL;
-	int timed_out = 0, count = 0;
-	unsigned long slack = 0;
-+	unsigned int busy_flag = net_busy_loop_on() ? POLL_BUSY_LOOP : 0;
-	unsigned long busy_end = 0;
-
-	if (end_time && !end_time->tv_sec && !end_time->tv_nsec) {
-		pt->_qproc = NULL;
-		timed_out = 1;
-	}
-
-	if (end_time && !timed_out)
-		slack = select_estimate_accuracy(end_time);
-
-	for (;;) {
-		struct poll_list *walk;
-+		bool can_busy_loop = false;
-
-		for (walk = list; walk != NULL; walk = walk->next) {
-			struct pollfd * pfd, * pfd_end;
-
-			pfd = walk->entries;
-			pfd_end = pfd + walk->len;
-			for (; pfd != pfd_end; pfd++) {
--				if (do_pollfd(pfd, pt)) {
-+				if (do_pollfd(pfd, pt, &can_busy_loop,
-+					      busy_flag)) {
-					count++;
-					pt->_qproc = NULL;
-+					busy_flag = 0;
-+					can_busy_loop = false;
-				}
-			}
-		}
-        
-		pt->_qproc = NULL;
-		if (!count) {
-			count = wait->error;
-			if (signal_pending(current))
-				count = -EINTR;
-		}
-		if (count || timed_out)
-			break;
-
-		/* only if found POLL_BUSY_LOOP sockets && not out of time */
-+		if (can_busy_loop && !need_resched()) {
-+			if (!busy_end) {
-+				busy_end = busy_loop_end_time();
-+				continue;
-+			}
-+			if (!busy_loop_timeout(busy_end))
-+				continue;
-+		}
-+		busy_flag = 0;
-
-		if (end_time && !to) {
-			expire = timespec_to_ktime(*end_time);
-			to = &expire;
-		}
-
-		if (!poll_schedule_timeout(wait, TASK_INTERRUPTIBLE, to, slack))
-			timed_out = 1;
-	}
-	return count;
-}
-```
-
-변경 사항만 살펴보겠습니다.
-
-```c
-static inline bool net_busy_loop_on(void)
-{
-	return sysctl_net_busy_poll;
-}
-
-static int do_poll(unsigned int nfds,  struct poll_list *list,
-		   struct poll_wqueues *wait, struct timespec *end_time)
-{
-	unsigned int busy_flag = net_busy_loop_on() ? POLL_BUSY_LOOP : 0;
-```
-
-`busy poll`이 설정되어 있으면 `busy_flag`를 `POLL_BUSY_LOOP`로 설정합니다.
-
-```c
-static unsigned int sock_poll(struct file *file, poll_table *wait)
-{
-    ...
-	sock = file->private_data;
-
-	if (sk_can_busy_loop(sock->sk)) {
-		/* this socket can poll_ll so tell the system call */
-		busy_flag = POLL_BUSY_LOOP;
-
-		/* once, only if requested by syscall */
-		if (wait && (wait->_key & POLL_BUSY_LOOP))
-			sk_busy_loop(sock->sk, 1);
-	}
-
-	return busy_flag | sock->ops->poll(file, sock, wait);
-}
-
-static inline unsigned int do_pollfd(struct pollfd *pollfd, poll_table *pwait,
-				     bool *can_busy_poll,
-				     unsigned int busy_flag)
-{
-	fd = pollfd->fd;
-	if (fd >= 0) {
-		struct fd f = fdget(fd);
-		if (f.file) {
-			if (f.file->f_op && f.file->f_op->poll) {
-				mask = f.file->f_op->poll(f.file, pwait);
-				if (mask & busy_flag)
-					*can_busy_poll = true;
-            ...
-}
-
-static inline unsigned int do_pollfd(struct pollfd *pollfd, poll_table *pwait,
-				     bool *can_busy_poll,
-				     unsigned int busy_flag)
-{
-	fd = pollfd->fd;
-	if (fd >= 0) {
-		struct fd f = fdget(fd);
-		if (f.file) {
-			if (f.file->f_op && f.file->f_op->poll) {
-				mask = f.file->f_op->poll(f.file, pwait);
-				if (mask & busy_flag)
-					*can_busy_poll = true;
-            ...
-}
-
-static int do_poll(unsigned int nfds,  struct poll_list *list,
-		   struct poll_wqueues *wait, struct timespec *end_time)
-{
-    ...
-
-	for (;;) {
-		struct poll_list *walk;
-+		bool can_busy_loop = false;
-
-		for (walk = list; walk != NULL; walk = walk->next) {
-			for (; pfd != pfd_end; pfd++) {
--				if (do_pollfd(pfd, pt)) {
-+				if (do_pollfd(pfd, pt, &can_busy_loop,
-+					      busy_flag)) {
-					count++;
-+					busy_flag = 0;
-+					can_busy_loop = false;
-				}
-			}
-		}
-```
-
-`sock_poll()`은 `sk_can_busy_loop()`이면 `can_busy_poll`을 `true`로 설정하고 busy poll을 수행합니다.
-
-```c
-		if (can_busy_loop && !need_resched()) {
-			if (!busy_end) {
-				busy_end = busy_loop_end_time();
-				continue;
-			}
-			if (!busy_loop_timeout(busy_end))
-				continue;
-		}
-		busy_flag = 0;
-
-        ...
-		if (!poll_schedule_timeout(wait, TASK_INTERRUPTIBLE, to, slack))
-			timed_out = 1;
-```
-
-`can_busy_loop`이 true이고, 스케쥴링이 필요하지 않은 상황이면 스케쥴링하지 않고 다시 루프를 돕니다.
-
-정리하자면, busy poll이 설정되어 있으면 `poll()` 류의 시스템콜은 procfs `busy_read` 단위로 procfs `busy_poll` 시간까지 busy poll을 수행하게 됩니다.
-
-시퀀스 다이어그램으로 그리면 다음과 같습니다.
+`poll()`을 호출하면 fd 목록에 이벤트가 없는 한 슬립과 재폴링을 반복합니다.
 
 ```mermaid
 sequenceDiagram
     autonumber
-    participant app as Application
-    participant do_poll as do_poll()
-    participant sock_poll as sock_poll()
-    participant ndo_busy_loop as ndo_busy_loop() (Driver)
+    participant app as [APP]
+    participant kern as [KERN] do_poll()
+    participant fd as [KERN] do_pollfd()
 
-    app ->> do_poll: syscall: poll()
-    
-    loop until timeout or count > 0
-        do_poll ->> sock_poll: do_pollfd()
-        
-        alt sk_can_busy_loop() is True
-            sock_poll ->> ndo_busy_loop: sk_busy_loop() -> ndo_busy_poll()
-            ndo_busy_loop ->> ndo_busy_loop: Check NIC Ring Buffer & Enqueue skb
-            
-            alt packet found
-                ndo_busy_loop -->> sock_poll: Return mask (POLLIN, etc.)
-                sock_poll -->> do_poll: count++
-            else still empty
-                ndo_busy_loop -->> sock_poll: Return 0
-            end
-        end
-
-        break when count > 0 or timeout
-            do_poll ->> do_poll: busy_loop_timeout check
-        end
-        
-        Note over do_poll: No Context Switch (Skip schedule())
+    app ->> kern: syscall: poll()
+    loop (2)~(3) each fd in poll_list
+        kern ->> fd: do_pollfd(pfd, pt)
+        fd -->> kern: event mask
     end
-
-    do_poll ->> app: return count
+    alt count > 0 or timed_out
+        kern -->> app: return count
+    else
+        kern ->> kern: poll_schedule_timeout() → sleep
+    end
 ```
+
+> **loop (2)~(3) each fd in poll_list**: `poll_list`의 모든 fd를 순회. 이후 `count > 0` 또는 `timed_out`이면 종료. 아니면 sleep 후 (2)부터 반복.
+
+1. 어플리케이션이 `poll()` 시스템콜을 호출.
+2. `poll_list`의 각 fd에 대해 `do_pollfd()`로 이벤트 발생 여부를 확인.
+3. 이벤트 마스크를 반환. 이벤트가 발생한 fd는 `count`를 증가시킴.
+4. `count > 0` 또는 타임아웃이면 반환. 아니면 `poll_schedule_timeout()`으로 슬립하며 이벤트나 타임아웃을 기다림.
+
+
+### `do_poll()` after `Busy Poll`
+
+Busy poll이 추가되면 슬립 전에 NAPI 인스턴스를 직접 폴링하는 단계가 삽입됩니다.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant app as [APP]
+    participant kern as [KERN] do_poll()
+    participant sock as [KERN] sock_poll()
+    participant drv as [DRV] ndo_busy_poll()
+
+    app ->> kern: syscall: poll()
+    loop (2)~(6) each fd in poll_list
+        kern ->> sock: do_pollfd(pfd, pt, busy_flag)
+        rect rgb(230, 255, 235)
+            sock ->> drv: sk_busy_loop() → ndo_busy_poll() [sk_can_busy_loop()]
+            drv -->> sock: done
+            sock -->> kern: POLL_BUSY_LOOP | event_mask
+        end
+        kern ->> kern: event found? count++ : can_busy_loop = true
+    end
+    alt count > 0 or timed_out
+        kern -->> app: return count
+    else can_busy_loop and !need_resched and !busy_loop_timeout
+        rect rgb(230, 255, 235)
+            kern ->> kern: continue (no sleep)
+        end
+    else
+        kern ->> kern: poll_schedule_timeout() → sleep
+    end
+```
+
+> **loop (2)~(6) each fd in poll_list**: `poll_list`의 모든 fd를 순회. 이후:
+> - `count > 0` 또는 `timed_out` → 종료
+> - `can_busy_loop && !need_resched() && !busy_loop_timeout()` → sleep 없이 (2)부터 반복
+> - 그 외 → sleep 후 반복
+
+1. 어플리케이션이 `poll()` 시스템콜을 호출. `net_busy_loop_on()`이면 `busy_flag = POLL_BUSY_LOOP`로 설정.
+2. `poll_list`의 각 fd에 대해 `do_pollfd()`를 호출하며 `busy_flag`를 전달.
+3. 소켓이 `sk_can_busy_loop()` 조건을 만족하면 `sock_poll()`이 `sk_busy_loop()` → `ndo_busy_poll()`을 호출(내부 절차는 앞서 본 recv 경로의 busy loop와 동일하되, `nonblock=1`이라 재시도 없이 한 번만 수행됨).
+4. `ndo_busy_poll()` 결과가 반환됨.
+5. `sock_poll()`이 `POLL_BUSY_LOOP | event_mask`를 반환.
+6. 이벤트를 찾았으면 `count`를 증가시키고 `busy_flag`를 초기화(busy loop 중단). 이벤트 없이 `POLL_BUSY_LOOP`만 반환됐으면 `can_busy_loop = true`로 설정 — 두 결과는 서로 배타적이다.
+7. 모든 fd 순회 후: `count > 0` 또는 타임아웃이면 반환. `can_busy_loop`이 true이고 스케줄링이 필요하지 않으며 타임아웃 전이면 sleep 없이 루프를 반복. 그 외에는 `poll_schedule_timeout()`으로 슬립.
+
+정리하자면, busy poll이 설정되어 있으면 `poll()` 류의 시스템콜은 소켓당 `ndo_busy_poll()`을 1회씩 호출하며, `sysctl_net_busy_poll` 시간까지 반복합니다.
